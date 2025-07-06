@@ -405,13 +405,4 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 - **Issues**: [GitHub Issues](https://github.com/your-username/ecommerce-api/issues)
 - **Discussions**: [GitHub Discussions](https://github.com/your-username/ecommerce-api/discussions)
 
-## 🙏 Acknowledgments
-
-- Spring Boot team for the excellent framework
-- Kubernetes community for orchestration platform
-- AWS for cloud infrastructure
-- Open source community for various tools and libraries
-
----
-
 **Built with ❤️ for demonstrating enterprise-level DevOps practices**
