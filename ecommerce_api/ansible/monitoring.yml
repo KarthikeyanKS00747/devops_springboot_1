@@ -1,0 +1,171 @@
+---
+- name: Deploy Monitoring Stack
+  kubernetes.core.helm:
+    name: prometheus
+    chart_ref: prometheus-community/kube-prometheus-stack
+    release_namespace: monitoring
+    create_namespace: true
+    values:
+      prometheus:
+        prometheusSpec:
+          retention: 30d
+          storageSpec:
+            volumeClaimTemplate:
+              spec:
+                storageClassName: gp2
+                accessModes: ["ReadWriteOnce"]
+                resources:
+                  requests:
+                    storage: 50Gi
+          additionalScrapeConfigs:
+            - job_name: 'ecommerce-api'
+              kubernetes_sd_configs:
+                - role: pod
+                  namespaces:
+                    names:
+                      - production
+                      - staging
+              relabel_configs:
+                - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+                  action: keep
+                  regex: true
+                - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_path]
+                  action: replace
+                  target_label: __metrics_path__
+                  regex: (.+)
+                - source_labels: [__address__, __meta_kubernetes_pod_annotation_prometheus_io_port]
+                  action: replace
+                  regex: ([^:]+)(?::\d+)?;(\d+)
+                  replacement: $1:$2
+                  target_label: __address__
+                - action: labelmap
+                  regex: __meta_kubernetes_pod_label_(.+)
+                - source_labels: [__meta_kubernetes_namespace]
+                  action: replace
+                  target_label: kubernetes_namespace
+                - source_labels: [__meta_kubernetes_pod_name]
+                  action: replace
+                  target_label: kubernetes_pod_name
+
+      grafana:
+        adminPassword: "{{ vault_grafana_password }}"
+        persistence:
+          enabled: true
+          storageClassName: gp2
+          size: 10Gi
+        dashboardProviders:
+          dashboardproviders.yaml:
+            apiVersion: 1
+            providers:
+            - name: 'default'
+              orgId: 1
+              folder: ''
+              type: file
+              disableDeletion: false
+              editable: true
+              options:
+                path: /var/lib/grafana/dashboards/default
+        dashboards:
+          default:
+            spring-boot:
+              gnetId: 12900
+              revision: 1
+              datasource: Prometheus
+            jvm-micrometer:
+              gnetId: 4701
+              revision: 7
+              datasource: Prometheus
+            kubernetes-cluster:
+              gnetId: 7249
+              revision: 1
+              datasource: Prometheus
+
+      alertmanager:
+        config:
+          global:
+            smtp_smarthost: 'localhost:587'
+            smtp_from: 'alerts@ecommerce.com'
+          route:
+            group_by: ['alertname']
+            group_wait: 10s
+            group_interval: 10s
+            repeat_interval: 1h
+            receiver: 'web.hook'
+          receivers:
+          - name: 'web.hook'
+            slack_configs:
+            - api_url: "{{ vault_slack_webhook_url }}"
+              channel: '#alerts'
+              title: 'Alert: {{ range .Alerts }}{{ .Annotations.summary }}{{ end }}'
+              text: '{{ range .Alerts }}{{ .Annotations.description }}{{ end }}'
+
+- name: Create custom alerting rules
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: monitoring.coreos.com/v1
+      kind: PrometheusRule
+      metadata:
+        name: ecommerce-api-alerts
+        namespace: monitoring
+        labels:
+          prometheus: kube-prometheus
+          role: alert-rules
+      spec:
+        groups:
+        - name: ecommerce-api
+          rules:
+          - alert: EcommerceAPIDown
+            expr: up{job="ecommerce-api"} == 0
+            for: 1m
+            labels:
+              severity: critical
+            annotations:
+              summary: "E-commerce API is down"
+              description: "E-commerce API has been down for more than 1 minute."
+          
+          - alert: EcommerceAPIHighLatency
+            expr: histogram_quantile(0.95, sum(rate(http_server_requests_seconds_bucket{job="ecommerce-api"}[5m])) by (le)) > 2
+            for: 5m
+            labels:
+              severity: warning
+            annotations:
+              summary: "E-commerce API high latency"
+              description: "95th percentile latency is above 2s for 5 minutes."
+          
+          - alert: EcommerceAPIHighErrorRate
+            expr: sum(rate(http_server_requests_total{job="ecommerce-api",status=~"5.."}[5m])) / sum(rate(http_server_requests_total{job="ecommerce-api"}[5m])) > 0.05
+            for: 5m
+            labels:
+              severity: critical
+            annotations:
+              summary: "E-commerce API high error rate"
+              description: "Error rate is above 5% for 5 minutes."
+          
+          - alert: EcommerceAPIHighMemoryUsage
+            expr: jvm_memory_used_bytes{job="ecommerce-api",area="heap"} / jvm_memory_max_bytes{job="ecommerce-api",area="heap"} > 0.8
+            for: 5m
+            labels:
+              severity: warning
+            annotations:
+              summary: "E-commerce API high memory usage"
+              description: "JVM heap memory usage is above 80% for 5 minutes."
+
+- name: Deploy Jaeger for distributed tracing
+  kubernetes.core.helm:
+    name: jaeger
+    chart_ref: jaegertracing/jaeger
+    release_namespace: monitoring
+    values:
+      provisionDataStore:
+        cassandra: false
+        elasticsearch: true
+      elasticsearch:
+        replicas: 1
+        minimumMasterNodes: 1
+      agent:
+        enabled: true
+      collector:
+        enabled: true
+      query:
+        enabled: true

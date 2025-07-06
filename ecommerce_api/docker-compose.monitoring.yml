@@ -1,0 +1,65 @@
+version: '3.8'
+
+services:
+  # Graphite service for metrics collection
+  graphite:
+    image: graphiteapp/graphite-statsd:latest
+    container_name: ecommerce-graphite
+    ports:
+      - "2003:2003"    # Carbon receiver - plaintext
+      - "2004:2004"    # Carbon receiver - pickle
+      - "2023:2023"    # Carbon aggregator - plaintext
+      - "2024:2024"    # Carbon aggregator - pickle
+      - "8080:8080"    # Graphite web interface
+    volumes:
+      - graphite_data:/opt/graphite/storage
+      - graphite_config:/opt/graphite/conf
+    environment:
+      - GRAPHITE_TIME_ZONE=Asia/Kolkata
+    networks:
+      - monitoring
+
+  # Grafana service for visualization
+  grafana:
+    image: grafana/grafana:latest
+    container_name: ecommerce-grafana
+    ports:
+      - "3000:3000"    # Grafana web interface
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin123
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_INSTALL_PLUGINS=grafana-clock-panel,grafana-simple-json-datasource
+    depends_on:
+      - graphite
+    networks:
+      - monitoring
+
+  # MySQL database (optional - if you want to switch back)
+  mysql:
+    image: mysql:8.0
+    container_name: ecommerce-mysql
+    ports:
+      - "3306:3306"
+    environment:
+      - MYSQL_ROOT_PASSWORD=password
+      - MYSQL_DATABASE=ecommerce_db
+      - MYSQL_USER=ecommerce_user
+      - MYSQL_PASSWORD=password
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./docker/mysql/init.sql:/docker-entrypoint-initdb.d/init.sql
+    networks:
+      - monitoring
+
+volumes:
+  graphite_data:
+  graphite_config:
+  grafana_data:
+  mysql_data:
+
+networks:
+  monitoring:
+    driver: bridge

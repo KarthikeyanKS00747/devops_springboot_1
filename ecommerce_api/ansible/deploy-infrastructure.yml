@@ -1,0 +1,150 @@
+---
+- name: Deploy E-commerce API Infrastructure
+  hosts: localhost
+  connection: local
+  gather_facts: no
+  vars:
+    aws_region: us-west-2
+    cluster_name: ecommerce-api-cluster
+    environment: production
+    
+  tasks:
+    - name: Install required Python packages
+      pip:
+        name:
+          - boto3
+          - kubernetes
+          - openshift
+        state: present
+
+    - name: Create Terraform workspace
+      terraform:
+        project_path: "../terraform"
+        state: present
+        workspace: "{{ environment }}"
+        variables:
+          aws_region: "{{ aws_region }}"
+          environment: "{{ environment }}"
+          project_name: "ecommerce-api"
+          db_password: "{{ vault_db_password }}"
+          redis_auth_token: "{{ vault_redis_auth_token }}"
+      register: terraform_output
+
+    - name: Update kubeconfig
+      shell: |
+        aws eks update-kubeconfig --region {{ aws_region }} --name {{ cluster_name }}
+      environment:
+        AWS_DEFAULT_REGION: "{{ aws_region }}"
+
+    - name: Install AWS Load Balancer Controller
+      kubernetes.core.helm:
+        name: aws-load-balancer-controller
+        chart_ref: eks/aws-load-balancer-controller
+        release_namespace: kube-system
+        create_namespace: true
+        values:
+          clusterName: "{{ cluster_name }}"
+          serviceAccount:
+            create: true
+            name: aws-load-balancer-controller
+            annotations:
+              eks.amazonaws.com/role-arn: "{{ terraform_output.outputs.alb_controller_role_arn.value }}"
+
+    - name: Install EBS CSI Driver
+      kubernetes.core.helm:
+        name: aws-ebs-csi-driver
+        chart_ref: aws-ebs-csi-driver/aws-ebs-csi-driver
+        release_namespace: kube-system
+        values:
+          controller:
+            serviceAccount:
+              create: true
+              name: ebs-csi-controller-sa
+              annotations:
+                eks.amazonaws.com/role-arn: "{{ terraform_output.outputs.ebs_csi_role_arn.value }}"
+
+    - name: Install Metrics Server
+      kubernetes.core.helm:
+        name: metrics-server
+        chart_ref: metrics-server/metrics-server
+        release_namespace: kube-system
+        create_namespace: true
+
+    - name: Install Cluster Autoscaler
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: cluster-autoscaler
+            namespace: kube-system
+            labels:
+              app: cluster-autoscaler
+          spec:
+            selector:
+              matchLabels:
+                app: cluster-autoscaler
+            template:
+              metadata:
+                labels:
+                  app: cluster-autoscaler
+                annotations:
+                  prometheus.io/scrape: 'true'
+                  prometheus.io/port: '8085'
+              spec:
+                serviceAccountName: cluster-autoscaler
+                containers:
+                - image: k8s.gcr.io/autoscaling/cluster-autoscaler:v1.27.3
+                  name: cluster-autoscaler
+                  resources:
+                    limits:
+                      cpu: 100m
+                      memory: 300Mi
+                    requests:
+                      cpu: 100m
+                      memory: 300Mi
+                  command:
+                  - ./cluster-autoscaler
+                  - --v=4
+                  - --stderrthreshold=info
+                  - --cloud-provider=aws
+                  - --skip-nodes-with-local-storage=false
+                  - --expander=least-waste
+                  - --node-group-auto-discovery=asg:tag=k8s.io/cluster-autoscaler/enabled,k8s.io/cluster-autoscaler/{{ cluster_name }}
+                  - --balance-similar-node-groups
+                  - --skip-nodes-with-system-pods=false
+                  env:
+                  - name: AWS_REGION
+                    value: "{{ aws_region }}"
+                  volumeMounts:
+                  - name: ssl-certs
+                    mountPath: /etc/ssl/certs/ca-certificates.crt
+                    readOnly: true
+                  imagePullPolicy: "Always"
+                volumes:
+                - name: ssl-certs
+                  hostPath:
+                    path: "/etc/ssl/certs/ca-bundle.crt"
+
+    - name: Create production namespace and secrets
+      kubernetes.core.k8s:
+        state: present
+        src: "../k8s/production/namespace.yaml"
+
+    - name: Deploy monitoring stack
+      include_tasks: monitoring.yml
+
+    - name: Configure log aggregation
+      include_tasks: logging.yml
+
+    - name: Display deployment information
+      debug:
+        msg:
+          - "Infrastructure deployed successfully!"
+          - "EKS Cluster: {{ cluster_name }}"
+          - "Region: {{ aws_region }}"
+          - "Environment: {{ environment }}"
+          - "RDS Endpoint: {{ terraform_output.outputs.rds_endpoint.value }}"
+          - "Redis Endpoint: {{ terraform_output.outputs.redis_endpoint.value }}"
+          - "ECR Repository: {{ terraform_output.outputs.ecr_repository_url.value }}"
